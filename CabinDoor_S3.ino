@@ -24,7 +24,7 @@
  *   CLOSE        -> Retract piston for 8 seconds
  *   STOP         -> Stop piston immediately
  * 
- * Version: 1.0.0
+ * Version: 1.0.1
  * ============================================================
  */
 
@@ -36,7 +36,7 @@
 // CONFIGURATION
 // ============================================================
 
-#define VERSION "1.0.0"
+#define VERSION "1.0.1"
 
 #define GAME_NAME "MermaidsTale"
 #define PROP_NAME "CabinDoor"
@@ -45,9 +45,9 @@
 #define MQTT_TOPIC_STATUS  "MermaidsTale/CabinDoor/status"
 #define MQTT_TOPIC_LOG     "MermaidsTale/CabinDoor/log"
 
-// WiFi credentials
-const char* WIFI_SSID = "YOUR_SSID";
-const char* WIFI_PASS = "YOUR_PASSWORD";
+// WiFi credentials - UPDATE THESE FOR YOUR NETWORK
+const char* WIFI_SSID = "AlchemyEscape";      // TODO: Set your WiFi SSID
+const char* WIFI_PASS = "your_password_here"; // TODO: Set your WiFi password
 
 // MQTT broker
 const char* MQTT_SERVER = "10.1.10.115";
@@ -324,7 +324,11 @@ void connectMQTT() {
             Serial.println("connected!");
 
             // Subscribe to command topic
-            mqttClient.subscribe(MQTT_TOPIC_COMMAND);
+            if (mqttClient.subscribe(MQTT_TOPIC_COMMAND)) {
+                Serial.println("[MQTT] Subscribed to command topic");
+            } else {
+                Serial.println("[MQTT] ERROR: Subscribe failed!");
+            }
 
             // Announce we're online
             mqttClient.publish(MQTT_TOPIC_STATUS, "ONLINE");
