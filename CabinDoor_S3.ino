@@ -330,19 +330,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         return;
     }
 
-    // PUZZLE_RESET - Drive door back to closed state without rebooting
+    // PUZZLE_RESET - Reset to closed state without rebooting
     if (strcmp(msg, "PUZZLE_RESET") == 0) {
-        if (debouncedLimitClosed) {
-            // Already closed, just confirm
-            currentState = DOOR_CLOSED;
-            mqttClient.publish(MQTT_TOPIC_COMMAND, "ALREADY_CLOSED");
-            Serial.println("[MQTT] PUZZLE_RESET -> Already closed");
-        } else {
-            // Drive door closed
-            retractPiston();
-            mqttClient.publish(MQTT_TOPIC_COMMAND, "CLOSING");
-            Serial.println("[MQTT] PUZZLE_RESET -> Closing door");
-        }
+        stopPiston();
+        mqttClient.publish(MQTT_TOPIC_COMMAND, "OK");
+        Serial.println("[MQTT] PUZZLE_RESET -> OK");
         return;
     }
 
