@@ -59,12 +59,12 @@ const int MQTT_PORT = 1883;
 
 // Relay pins - ESP32-S3 safe GPIO pins
 // Avoid: 0, 3, 19, 20, 45, 46 (strapping/USB/JTAG)
-const int PIN_RELAY_EXTEND  = 4;   // Relay 1: Extend piston (open)
-const int PIN_RELAY_RETRACT = 5;   // Relay 2: Retract piston (close)
+const int PIN_RELAY_EXTEND  = 2;   // Relay 1: Extend piston (open)
+const int PIN_RELAY_RETRACT = 4;   // Relay 2: Retract piston (close)
 
 // Magnetic limit switch pins - INPUT_PULLUP, active LOW (reed closes to GND)
-const int PIN_LIMIT_OPEN   = 6;   // Reed switch: door fully open
-const int PIN_LIMIT_CLOSED = 7;   // Reed switch: door fully closed
+const int PIN_LIMIT_OPEN   = 5;   // Reed switch: door fully open
+const int PIN_LIMIT_CLOSED = 18;  // Reed switch: door fully closed
 
 // Relay logic - most modules are ACTIVE LOW
 const bool RELAY_ACTIVE_LOW = true;
