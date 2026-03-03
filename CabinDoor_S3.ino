@@ -5,26 +5,29 @@
  * ============================================================
  * 
  * Platform: ESP32-S3
- * Hardware: 2-Channel Relay Module + Electric Piston
+ * Hardware: 2-Channel Relay Module + Electric Piston + 2x Magnetic Reed Switches
  *   - Relay 1: Extend piston (open door)
  *   - Relay 2: Retract piston (close door)
- * 
+ *   - Limit Open:   Magnetic reed switch detects fully open position
+ *   - Limit Closed: Magnetic reed switch detects fully closed position
+ *
  * MQTT Topics:
  *   Subscribe: MermaidsTale/CabinDoor/command
  *   Publish:   MermaidsTale/CabinDoor/command  (PONG, state responses)
  *              MermaidsTale/CabinDoor/status   (ONLINE, state changes)
  *              MermaidsTale/CabinDoor/log      (debug output)
- * 
+ *              MermaidsTale/CabinDoor/limit    (limit switch events)
+ *
  * Commands:
  *   PING         -> PONG (health check)
- *   STATUS       -> Current state
+ *   STATUS       -> Current state + limit switch states
  *   RESET        -> Reboot device
  *   PUZZLE_RESET -> Reset to closed state
- *   OPEN         -> Extend piston for 8 seconds
- *   CLOSE        -> Retract piston for 8 seconds
+ *   OPEN         -> Extend piston (stops on limit switch or 8s timeout)
+ *   CLOSE        -> Retract piston (stops on limit switch or 8s timeout)
  *   STOP         -> Stop piston immediately
- * 
- * Version: 1.0.0
+ *
+ * Version: 1.1.0
  * ============================================================
  */
 
@@ -36,7 +39,7 @@
 // CONFIGURATION
 // ============================================================
 
-#define VERSION "1.0.0"
+#define VERSION "1.1.0"
 
 #define GAME_NAME "MermaidsTale"
 #define PROP_NAME "CabinDoor"
@@ -44,6 +47,7 @@
 #define MQTT_TOPIC_COMMAND "MermaidsTale/CabinDoor/command"
 #define MQTT_TOPIC_STATUS  "MermaidsTale/CabinDoor/status"
 #define MQTT_TOPIC_LOG     "MermaidsTale/CabinDoor/log"
+#define MQTT_TOPIC_LIMIT   "MermaidsTale/CabinDoor/limit"
 
 // WiFi credentials
 const char* WIFI_SSID = "YOUR_SSID";
@@ -58,12 +62,17 @@ const int MQTT_PORT = 1883;
 const int PIN_RELAY_EXTEND  = 4;   // Relay 1: Extend piston (open)
 const int PIN_RELAY_RETRACT = 5;   // Relay 2: Retract piston (close)
 
+// Magnetic limit switch pins - INPUT_PULLUP, active LOW (reed closes to GND)
+const int PIN_LIMIT_OPEN   = 6;   // Reed switch: door fully open
+const int PIN_LIMIT_CLOSED = 7;   // Reed switch: door fully closed
+
 // Relay logic - most modules are ACTIVE LOW
 const bool RELAY_ACTIVE_LOW = true;
 
 // Timing
-const unsigned long PISTON_RUN_TIME_MS  = 8000;   // 8 seconds
+const unsigned long PISTON_RUN_TIME_MS  = 8000;   // 8 seconds (safety timeout)
 const unsigned long RELAY_SWITCH_DELAY  = 100;    // Safety delay between relay switches
+const unsigned long LIMIT_DEBOUNCE_MS   = 150;    // Debounce for limit switches
 
 // ============================================================
 // STATE
@@ -72,7 +81,9 @@ const unsigned long RELAY_SWITCH_DELAY  = 100;    // Safety delay between relay 
 enum DoorState {
     DOOR_STOPPED,
     DOOR_OPENING,
-    DOOR_CLOSING
+    DOOR_CLOSING,
+    DOOR_OPEN,
+    DOOR_CLOSED
 };
 
 WiFiClient wifiClient;
@@ -81,6 +92,14 @@ PubSubClient mqttClient(wifiClient);
 DoorState currentState = DOOR_STOPPED;
 unsigned long actionStartTime = 0;
 bool pistonRunning = false;
+
+// Limit switch debounce state
+bool debouncedLimitOpen   = false;
+bool debouncedLimitClosed = false;
+bool lastRawLimitOpen     = false;
+bool lastRawLimitClosed   = false;
+unsigned long limitOpenStableTime   = 0;
+unsigned long limitClosedStableTime = 0;
 
 // ============================================================
 // RELAY HELPERS
@@ -125,6 +144,8 @@ const char* stateToString(DoorState state) {
         case DOOR_STOPPED:  return "STOPPED";
         case DOOR_OPENING:  return "OPENING";
         case DOOR_CLOSING:  return "CLOSING";
+        case DOOR_OPEN:     return "OPEN";
+        case DOOR_CLOSED:   return "CLOSED";
         default:            return "UNKNOWN";
     }
 }
@@ -180,6 +201,65 @@ void stopPiston() {
 }
 
 // ============================================================
+// LIMIT SWITCH CHECK
+// ============================================================
+
+void checkLimitSwitches() {
+    unsigned long now = millis();
+
+    // Read raw values (active LOW: LOW = magnet present = limit hit)
+    bool rawOpen   = (digitalRead(PIN_LIMIT_OPEN)   == LOW);
+    bool rawClosed = (digitalRead(PIN_LIMIT_CLOSED)  == LOW);
+
+    // --- Debounce OPEN switch ---
+    if (rawOpen != lastRawLimitOpen) {
+        limitOpenStableTime = now;
+        lastRawLimitOpen = rawOpen;
+    }
+    if ((now - limitOpenStableTime >= LIMIT_DEBOUNCE_MS) && rawOpen != debouncedLimitOpen) {
+        debouncedLimitOpen = rawOpen;
+        if (debouncedLimitOpen) {
+            mqttClient.publish(MQTT_TOPIC_LIMIT, "LIMIT_OPEN_HIT");
+            Serial.println("[LIMIT] Open switch HIT");
+        } else {
+            mqttClient.publish(MQTT_TOPIC_LIMIT, "LIMIT_OPEN_CLEAR");
+            Serial.println("[LIMIT] Open switch CLEAR");
+        }
+    }
+
+    // --- Debounce CLOSED switch ---
+    if (rawClosed != lastRawLimitClosed) {
+        limitClosedStableTime = now;
+        lastRawLimitClosed = rawClosed;
+    }
+    if ((now - limitClosedStableTime >= LIMIT_DEBOUNCE_MS) && rawClosed != debouncedLimitClosed) {
+        debouncedLimitClosed = rawClosed;
+        if (debouncedLimitClosed) {
+            mqttClient.publish(MQTT_TOPIC_LIMIT, "LIMIT_CLOSED_HIT");
+            Serial.println("[LIMIT] Closed switch HIT");
+        } else {
+            mqttClient.publish(MQTT_TOPIC_LIMIT, "LIMIT_CLOSED_CLEAR");
+            Serial.println("[LIMIT] Closed switch CLEAR");
+        }
+    }
+
+    // --- Stop piston when limit is reached ---
+    if (pistonRunning && currentState == DOOR_OPENING && debouncedLimitOpen) {
+        allRelaysOff();
+        currentState = DOOR_OPEN;
+        mqttClient.publish(MQTT_TOPIC_STATUS, "OPEN_COMPLETE");
+        mqttLogf("Limit switch: door fully OPEN");
+    }
+
+    if (pistonRunning && currentState == DOOR_CLOSING && debouncedLimitClosed) {
+        allRelaysOff();
+        currentState = DOOR_CLOSED;
+        mqttClient.publish(MQTT_TOPIC_STATUS, "CLOSE_COMPLETE");
+        mqttLogf("Limit switch: door fully CLOSED");
+    }
+}
+
+// ============================================================
 // MQTT CALLBACK - WATCHTOWER COMPLIANT
 // ============================================================
 
@@ -228,10 +308,15 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         return;
     }
 
-    // STATUS - Report current state
+    // STATUS - Report current state + limit switches
     if (strcmp(msg, "STATUS") == 0) {
-        mqttClient.publish(MQTT_TOPIC_COMMAND, stateToString(currentState));
-        Serial.printf("[MQTT] STATUS -> %s\n", stateToString(currentState));
+        char statusBuf[128];
+        snprintf(statusBuf, sizeof(statusBuf), "%s|LIMIT_OPEN:%s|LIMIT_CLOSED:%s",
+            stateToString(currentState),
+            debouncedLimitOpen ? "ACTIVE" : "CLEAR",
+            debouncedLimitClosed ? "ACTIVE" : "CLEAR");
+        mqttClient.publish(MQTT_TOPIC_COMMAND, statusBuf);
+        Serial.printf("[MQTT] STATUS -> %s\n", statusBuf);
         return;
     }
 
@@ -365,9 +450,34 @@ void setup() {
     pinMode(PIN_RELAY_RETRACT, OUTPUT);
     allRelaysOff();
 
+    // Initialize limit switch pins
+    pinMode(PIN_LIMIT_OPEN, INPUT_PULLUP);
+    pinMode(PIN_LIMIT_CLOSED, INPUT_PULLUP);
+
+    // Read initial limit switch positions
+    debouncedLimitOpen   = (digitalRead(PIN_LIMIT_OPEN)   == LOW);
+    debouncedLimitClosed = (digitalRead(PIN_LIMIT_CLOSED)  == LOW);
+    lastRawLimitOpen     = debouncedLimitOpen;
+    lastRawLimitClosed   = debouncedLimitClosed;
+
+    if (debouncedLimitOpen && debouncedLimitClosed) {
+        Serial.println("[LIMIT] WARNING: Both limits active on boot!");
+        currentState = DOOR_STOPPED;
+    } else if (debouncedLimitClosed) {
+        currentState = DOOR_CLOSED;
+        Serial.println("[LIMIT] Boot position: CLOSED");
+    } else if (debouncedLimitOpen) {
+        currentState = DOOR_OPEN;
+        Serial.println("[LIMIT] Boot position: OPEN");
+    } else {
+        currentState = DOOR_STOPPED;
+        Serial.println("[LIMIT] Boot position: UNKNOWN (no limit active)");
+    }
+
     Serial.printf("Relay pins: EXTEND=%d, RETRACT=%d\n", PIN_RELAY_EXTEND, PIN_RELAY_RETRACT);
+    Serial.printf("Limit pins: OPEN=%d, CLOSED=%d\n", PIN_LIMIT_OPEN, PIN_LIMIT_CLOSED);
     Serial.printf("Relay logic: %s\n", RELAY_ACTIVE_LOW ? "ACTIVE LOW" : "ACTIVE HIGH");
-    Serial.printf("Piston run time: %lu ms\n", PISTON_RUN_TIME_MS);
+    Serial.printf("Piston run time: %lu ms (safety timeout)\n", PISTON_RUN_TIME_MS);
 
     // Connect to network
     connectWiFi();
@@ -394,15 +504,18 @@ void loop() {
     }
     mqttClient.loop();
 
-    // Check piston timeout
+    // Check limit switches (stops piston if limit reached)
+    checkLimitSwitches();
+
+    // Safety timeout - stops piston if no limit switch triggered
     if (pistonRunning && (millis() - actionStartTime >= PISTON_RUN_TIME_MS)) {
-        Serial.println("[INFO] Piston timeout reached. Stopping.");
+        Serial.println("[INFO] Piston timeout reached (no limit hit). Stopping.");
 
         const char* completedState = (currentState == DOOR_OPENING) ? "OPEN_COMPLETE" : "CLOSE_COMPLETE";
         allRelaysOff();
         currentState = DOOR_STOPPED;
 
         mqttClient.publish(MQTT_TOPIC_STATUS, completedState);
-        mqttLogf("Piston %s", completedState);
+        mqttLogf("Timeout: %s (limit switch not reached)", completedState);
     }
 }
